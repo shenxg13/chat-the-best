@@ -13,7 +13,7 @@ SQL Baseline 系统用于回答两个不同问题：
 
 ```text
 历史已完成 SQL
-  -> 结构化历史数据源
+  -> 结构化历史数据源 / CSV 日志
   -> SQL 结构指纹
   -> 历史耗时分布 / Baseline
 
@@ -30,6 +30,26 @@ SQL Baseline 系统用于回答两个不同问题：
 
 ---
 
+## 已确认现网环境
+
+已确认版本：
+
+- PostgreSQL 9.4.26
+- Greenplum Database 6.20.3
+- HashData Warehouse 3.13.13
+
+架构特征：
+
+- HashData 为基于 Greenplum 6 的定制版本；
+- 存在共享 Catalog / 计算存储分离相关增强；
+- 业务数据存储在 S3；
+- 同一业务固定路由到同一个 GP 计算集群；
+- 大部分数据库监控接口仍沿用 Greenplum 6 的 `pg_catalog` 和 `gp_toolkit` 体系。
+
+这些事实构成后续 Baseline 设计的现网前提，不再继续假设版本未知。
+
+---
+
 ## 核心架构决策
 
 ### 1. Baseline 离线构建，按天更新
@@ -43,7 +63,7 @@ Baseline 本质上是统计模型，不需要随每次 SQL 执行实时更新。
 ```text
 生产 Greenplum / HashData
   ↓
-已完成 SQL 的结构化历史数据
+已完成 SQL 的历史执行事实
   ↓ 成熟采集组件持续或批量抽取
 离线 / 独立分析库
   ↓
@@ -101,6 +121,25 @@ SQL 指纹组件应：
 
 ## Greenplum / HashData 原生数据源结论
 
+### 核心结论：系统视图不能直接构建 SQL Baseline 历史事实表
+
+已经确认，仅依赖 MPP / GP 的系统视图，无法获得“每次 SQL 执行一条记录”的完整历史流水。
+
+典型能力边界：
+
+- `pg_stat_activity`：当前会话 / 当前或最近 SQL 的运行态信息；SQL 完成后不形成可长期使用的执行历史；
+- `gp_resq_activity`、`gp_resqueue_status`：队列和排队运行态信息，不是执行历史；
+- `gp_workfile_usage_per_query` 等：适合捕获执行中的 spill / workfile 状态，但 SQL 完成后不能作为历史事实源；
+- `pg_stat_*`：主要是数据库、表、函数等对象的累计统计，不是单次 SQL 明细。
+
+因此 Baseline 的基础事实表不能只靠系统视图构建。
+
+数据源应明确分工：
+
+- **历史事实源**：结构化 SQL 历史数据（若现场存在且覆盖完整）或 Greenplum CSV 日志；
+- **运行态补充源**：`pg_stat_activity`、资源队列、锁、workfile 等；
+- **上下文源**：Catalog / 统计视图，用于补充表类型、分布策略、AO/Heap、统计信息、对象大小等环境特征。
+
 ### 当前执行 SQL
 
 优先使用 `pg_stat_activity` 或当前版本等价 activity/session 视图获取当前 active SQL、`query_start` 和等待状态，实时计算已运行时长。
@@ -109,20 +148,15 @@ SQL 指纹组件应：
 
 ### 历史执行明细
 
-历史 Baseline 的数据源优先级调整为：
+历史 Baseline 的数据源优先级应以现场实际能力为准：
 
-1. **gpperfmon / Greenplum Command Center 的结构化历史查询数据**（如实际版本提供 `queries_history`）；
-2. Coordinator 已轮转 CSV 日志；
+1. **gpperfmon / Greenplum Command Center 的结构化历史查询数据**（如果现场已启用、字段足够且覆盖完整）；
+2. **Coordinator 已轮转 CSV 日志**；
 3. `gp_log_database` 等日志外部表仅作为调查、补充或一次性验证手段。
 
-结构化历史表比 CSV 更适合作为主数据源，因为已经包含查询文本、状态和时间字段，不需要自行处理 CSV 中 SQL 的逗号、引号、多行和日志事件拼装。
+结构化历史表的优势是已经包含查询文本、状态和时间字段，不需要自行处理 CSV 中 SQL 的逗号、引号、多行和日志事件拼装。
 
-CSV 日志仍有价值：
-
-- 补充错误信息；
-- 底层故障诊断；
-- 在 gpperfmon / GPCC 不可用时作为历史来源；
-- 保留可重放的原始证据。
+CSV 日志则具有更底层、可重放的证据价值，并且当前已经确认现网日志足以形成第一版 Baseline 的核心事实数据。
 
 ### `gp_log_database` 不适合作为长期高频采集入口
 
@@ -140,11 +174,153 @@ Greenplum 能标识一次具体执行，但这和“同类 SQL 的结构指纹�
 tmid + ssid + ccnt
 ```
 
-可以用于标识一次具体查询执行，但不能用于把“结构相同、参数不同”的 SQL 聚为同一类。
+以及日志中的：
 
-GP6 文档中的 `query_hash` 曾存在但未实现，因此不能假定现网可以直接使用原生 SQL 结构指纹。
+```text
+gp_session_id + gp_command_count
+```
 
-**当前现网 Greenplum 的确切版本尚未确认。后续不能继续默认 GP6，必须先执行 `SELECT version();`，再针对实际版本验证 `query_hash`、`pg_stat_statements`、gpperfmon / GPCC 和 activity 视图能力。**
+都适合标识或关联一次具体查询执行，但不能用于把“结构相同、参数不同”的 SQL 聚为同一类。
+
+GP6 不能假定存在可直接用于 Baseline 的原生 SQL 结构指纹，因此仍需要自建统一 Fingerprint。
+
+---
+
+## Greenplum CSV 日志格式确认
+
+现网日志片段与 Greenplum 6 的专有 CSV server log 高度匹配。
+
+已确认可见典型字段包括：
+
+- `event_time`
+- `user_name`
+- `database_name`
+- `process_id`
+- `thread_id`
+- `remote_host`
+- `remote_port`
+- `session_start_time`
+- `transaction_id`
+- `gp_session_id`
+- `gp_command_count`
+- `gp_segment`
+- `event_severity`
+- `sql_state_code`
+- `event_message`（例如 `duration: 1937.324 ms`）
+- 多行 SQL 文本
+- `file_name`
+- `file_line`
+
+这些字段已经足以支持第一版：
+
+- SQL 归一化和指纹生成；
+- SQL 执行次数统计；
+- 平均值、P50/P90/P95/P99 等耗时基线；
+- 按小时 / 天 / 时间窗口聚合；
+- 按数据库、用户、集群分类；
+- Top SQL；
+- 执行时间异常偏离检测。
+
+后续是否还能稳定得到行数、错误上下文、bind 参数、计划信息等，应单独验证，不应在第一版设计里假设一定存在。
+
+### CSV 解析约束
+
+Greenplum 标准日志的一条逻辑 CSV 记录可以跨多个物理文本行，因为 SQL 本身可能包含换行、逗号和引号。
+
+因此不能采用：
+
+- “逐物理行 + 正则切割”；
+- 简单按逗号 `split`；
+- 看到 `duration:` 就向前后拼 SQL 的状态机。
+
+正确方式应是：
+
+- 按 CSV 引号规则读取**逻辑 record**；
+- 使用成熟 CSV parser 处理 SQL 内部的换行、逗号和双引号；
+- 解析后输出标准化的 `ExecutionRecord`。
+
+### SQL 执行关联键
+
+Greenplum 日志中的：
+
+```text
+gp_session_id + gp_command_count
+```
+
+可用于关联同一会话中的一次 command / SQL。
+
+为了跨集群、长期保存和避免重启后潜在重复，工程上建议进一步带上：
+
+```text
+cluster_id
++ session_start_time
++ gp_session_id
++ gp_command_count
+```
+
+作为执行事件的稳定关联维度。
+
+---
+
+## Greenplum 原生诊断能力的成本分层
+
+不能只记录“有无某个视图”，还需要记录查询成本和是否适合实时采集。
+
+| 能力 | 典型接口 | 成本 | 是否适合实时 |
+|---|---|---:|---|
+| 当前 SQL | `pg_stat_activity` | 低 | 是 |
+| 资源队列 | `gp_resqueue_status` / `gp_resq_activity` | 低~中 | 是 |
+| Workfile / Spill | `gp_workfile_*` | 中 | 是，需控制频率 |
+| 表 / Catalog 统计 | `pg_stat_*` / catalog | 低~中 | 可定期 |
+| 数据倾斜 | `gp_skew_coefficients` | 高 | 否 |
+| 数据倾斜 | `gp_skew_idle_fractions` | 高 | 否 |
+
+### `gp_skew_coefficients` 的实现与成本确认
+
+已沿 `gp_toolkit` 定义逐层下钻：
+
+```text
+gp_skew_coefficients
+  -> __gp_skew_coefficients()
+  -> gp_skew_coefficient(oid)
+  -> gp_skew_details(oid)
+```
+
+`__gp_skew_coefficients()` 会枚举用户数据表，并对每张表调用 `gp_skew_coefficient()`，因此天然是全库级循环。
+
+对 AO 表，`gp_skew_details()` 主要通过：
+
+```text
+pg_catalog.pg_aoseg_distribution(oid)
+```
+
+读取各 Segment 的 tuple count 元数据，不需要直接扫描业务表。
+
+对 Heap 表，则动态执行等价于：
+
+```sql
+SELECT gp_segment_id, COUNT(*)
+FROM <table>
+GROUP BY gp_segment_id;
+```
+
+因此在存在大量或超大 Heap 表时，`gp_skew_coefficients` 可能触发大量全表扫描。
+
+结论：
+
+> `gp_skew_coefficients` 是按需诊断工具，不是实时监控或全量 Baseline 的基础指标源。
+
+### AO / Heap 相关确认
+
+AO = **Append Only**，不是 Ordered。
+
+存储类型应区分：
+
+- Heap
+- AO Row
+- AO Column
+
+AO 表的 skew 统计可以利用 AO 元数据，而 Heap 表无法从同类元数据直接得到精确 Segment tuple count，所以 Toolkit 会退化为实际 `COUNT(*) GROUP BY gp_segment_id`。
 
 ---
 
@@ -179,12 +355,12 @@ GP6 文档中的 `query_hash` 曾存在但未实现，因此不能假定现网�
 
 如果必须读取 CSV：
   Filebeat 负责文件读取与续传
-  Logstash 负责结构化解析
+  后续组件负责按完整 CSV record 解析
 ```
 
 ### 关于 Filebeat + Greenplum CSV
 
-Greenplum CSV 的 SQL 字段可能包含逗号、双引号和换行，所以不能把 Filebeat 当作 CSV 解析器。Filebeat 只负责可靠读取和转发，CSV 解析和事件组装必须在后续组件中完成，并需要先用真实日志验证跨物理行记录是否会被错误拆分。
+Greenplum CSV 的 SQL 字段可能包含逗号、双引号和换行，所以不能把 Filebeat 当作 CSV 解析器。Filebeat 只负责可靠读取和转发，CSV 解析和事件组装必须在后续组件中完成，并需要用真实日志验证跨物理行记录不会被错误拆分。
 
 ### 关于 Logstash 落 PostgreSQL / MySQL
 
@@ -200,9 +376,66 @@ Logstash / Filebeat -> Kafka -> Kafka Connect JDBC Sink -> PostgreSQL
 
 ---
 
+## Baseline 数据库的技术选型边界
+
+SQL Baseline 的核心模型**不依赖 PostgreSQL 独有特性**。
+
+核心逻辑本质是：
+
+```text
+SQL Execution History
+  -> Normalize / Fingerprint
+  -> Window Aggregation
+  -> Baseline Statistics
+  -> Anomaly Detection
+```
+
+只要数据库支持常规表、索引、聚合、唯一约束和时间分区等基本能力，就可以实现。
+
+### PostgreSQL 的优势但非硬依赖
+
+若第一版使用 PostgreSQL，可便利地利用：
+
+- JSONB
+- 分区表
+- `INSERT ... ON CONFLICT`
+- `avg/stddev/percentile_cont`
+- BRIN
+
+但核心业务逻辑不应绑定到：
+
+- TimescaleDB
+- pgvector
+- 复杂 PL/pgSQL
+- 大量数据库触发器
+- PostgreSQL 专属调度机制
+
+推荐把以下能力放在应用层，保持数据库可替换：
+
+- 日志解析
+- SQL 归一化
+- SQL 指纹算法
+- 时间窗口定义
+- Baseline 算法
+- 异常检测规则
+- 告警生命周期
+
+其他数据库的定位：
+
+- MySQL：可以实现核心模型，但复杂统计和分析能力通常不如 PostgreSQL 顺手；
+- TiDB：适合更大规模和横向扩展，但不是第一版必须引入；
+- ClickHouse：非常适合未来大规模 SQL 执行明细、长期保留和大量百分位聚合；
+- OpenSearch：适合作为 SQL / 错误日志全文检索补充，不建议作为 Baseline 主数据库。
+
+当前倾向：
+
+> 第一版使用 PostgreSQL，但保持核心数据模型和算法数据库无关；未来如明细规模显著增长，再考虑将执行明细和分析查询拆到 ClickHouse。
+
+---
+
 ## 数据存储与监控分工
 
-### PostgreSQL / TimescaleDB
+### PostgreSQL
 
 用于存储和分析：
 
@@ -216,7 +449,7 @@ Logstash / Filebeat -> Kafka -> Kafka Connect JDBC Sink -> PostgreSQL
 
 ### Prometheus
 
-Prometheus 自带的是自己的 TSDB，不是 TimescaleDB。
+Prometheus 自带自己的 TSDB，不是 TimescaleDB。
 
 Prometheus 只保存低基数汇总指标，例如：
 
@@ -359,7 +592,7 @@ execution_duration
 status
 database / application
 query_start
-skew_cpu / skew_rows（若原数据源已有）
+skew_cpu / skew_rows（仅当原数据源已经提供）
 ```
 
 按结构指纹统计：
@@ -394,11 +627,9 @@ skew_cpu / skew_rows（若原数据源已有）
 - 等值参数的类型 / 热度；
 - 其他可从 AST 和原始 SQL 直接提取的特征。
 
-这些分析优先在离线分析侧完成，不需要逐条回生产库。
+### 第三层：按需执行计划和诊断分析
 
-### 第三层：按需执行计划分析
-
-只针对以下对象再考虑获取计划或 estimated rows：
+只针对以下对象再考虑获取计划或更重的诊断信息：
 
 - 当前正在异常运行的 SQL；
 - 高频高离散指纹；
@@ -414,7 +645,7 @@ skew_cpu / skew_rows（若原数据源已有）
 - 超时保护；
 - 同一指纹 / 参数画像避免重复分析。
 
-执行计划属于**异常后的诊断信息**，不是全量 Baseline 字段。
+执行计划、全表 skew 等属于**异常后的诊断信息**，不是全量 Baseline 字段。
 
 ---
 
@@ -562,7 +793,18 @@ pg_stat_activity / 等价 activity 视图
 一次具体执行的 `execution_id` 与结构指纹必须分开：
 
 - `structural_fingerprint`：表示同一类 SQL；
-- `execution_id`：表示当前这一具体执行实例，可由 session / pid / query_start 等组合生成。
+- `execution_id`：表示当前这一具体执行实例。
+
+对于历史日志事件，推荐执行关联维度：
+
+```text
+cluster_id
++ session_start_time
++ gp_session_id
++ gp_command_count
+```
+
+对于 activity 采样，可由 cluster / session / pid / query_start 等组合生成运行中的 execution identity。
 
 同一条长 SQL 会被连续采样多次，异常事件必须基于 `execution_id` 去重并更新 `last_detected_at`，不能每次采样都生成新事件。
 
@@ -604,13 +846,36 @@ sql_anomaly_event
     当前运行异常事件
 ```
 
+建议在日志适配层先形成数据库无关标准事件：
+
+```text
+Greenplum CSV Log
+      |
+      v
+Log Parser / Adapter
+      |
+      v
+ExecutionRecord
+      |
+      +--> SQL Normalize / Fingerprint
+      |
+      v
+Execution History
+      |
+      v
+Baseline Aggregator
+      |
+      v
+Baseline / Anomaly
+```
+
 原始输入建议保留足够长时间，使 SQL 指纹或解析算法升级后可以重新 Replay，而不需要重新访问生产环境。
 
 ---
 
 ## AI 的位置
 
-现网目前不具备部署 AI Agent 的条件，因此第一阶段不依赖 AI。
+现网第一阶段不依赖 AI。
 
 现网系统自身应做到：
 
@@ -635,15 +900,16 @@ sql_anomaly_event
 
 ## 推荐 MVP 技术栈
 
-当前建议调整为：
+当前建议：
 
 ```text
-历史采集：优先 Logstash JDBC Input / 其他成熟 JDBC 增量组件
-CSV 兜底：Filebeat + Logstash
-当前 SQL：Logstash JDBC Input 周期读取 activity 视图
+历史采集：优先成熟结构化历史采集；CSV 作为已确认可用的事实来源
+CSV 文件读取：Filebeat 或同类成熟组件
+CSV 逻辑 record 解析：支持标准 CSV multiline 的解析层
+当前 SQL：周期读取 activity 视图
 分析服务：Python 或 Go
 SQL parser：libpg_query 生态 / pglast / pg_query_go
-分析数据库：PostgreSQL 17（第一版）
+分析数据库：PostgreSQL（第一版）
 展示：Grafana
 指标与告警：Prometheus + Alertmanager
 版本管理：Git
@@ -655,14 +921,11 @@ SQL parser：libpg_query 生态 / pglast / pg_query_go
 
 ## 第一阶段实施顺序
 
-1. **确认现网 Greenplum 真实版本。**
-   ```sql
-   SELECT version();
-   ```
-2. 确认 gpperfmon / GPCC 是否启用，以及 `queries_history` / `queries_now` 的实际结构和数据覆盖情况。
-3. 确认 activity 视图当前能提供的 SQL 文本、query_start、等待状态、session 标识等字段。
-4. 确定历史主数据源：优先结构化历史表；CSV 作为补充 / 兜底。
-5. 用成熟组件搭建历史增量采集和当前 activity 周期采样，不先自研采集器。
+1. 确认 gpperfmon / GPCC 是否启用，以及 `queries_history` / `queries_now` 的实际结构和数据覆盖情况。
+2. 确认 activity 视图当前能提供的 SQL 文本、query_start、等待状态、session 标识等字段。
+3. 在“结构化历史表”和“已确认格式的 Greenplum CSV 日志”之间确定历史主数据源；CSV 至少作为可用兜底和原始证据源。
+4. 定义 `ExecutionRecord` 标准字段，以及日志字段到标准事件的映射。
+5. 用成熟组件搭建历史增量采集和当前 activity 周期采样，不先自研文件 tail / 断点续传。
 6. 建立原始历史表和运行中快照表。
 7. 实现统一 AST / SQL fingerprint，并加入 fingerprint 版本管理。
 8. 建立 `sql_execution` 和 `sql_fingerprint_dictionary`。
@@ -677,6 +940,7 @@ SQL parser：libpg_query 生态 / pglast / pg_query_go
 - 全量参数敏感自动聚类；
 - 全量执行计划 Baseline；
 - 全量 estimated rows；
+- 全量表 skew 实时采集；
 - SQL 对象依赖分析；
 - 工作日 / 周末和小时级模型；
 - 自动接受 Baseline 漂移；
@@ -686,9 +950,10 @@ SQL parser：libpg_query 生态 / pglast / pg_query_go
 
 ## 当前待确认项
 
-1. 现网 Greenplum 的确切版本。
-2. gpperfmon / GPCC 是否启用，以及历史 SQL 是否覆盖足够完整。
-3. `queries_history` / `queries_now` / activity 视图的实际字段。
-4. `query_hash` 是否可用，`pg_stat_statements` 是否可用及能力边界。
-5. 最终历史落库链路：目标仍是“采集尽量用成熟组件，自研集中在 SQL 指纹与分析”。
+1. gpperfmon / GPCC 是否启用，以及历史 SQL 是否覆盖足够完整。
+2. `queries_history` / `queries_now` 的实际字段与保留周期。
+3. 日志中行数、错误上下文、bind 参数等扩展字段的稳定可用程度。
+4. 最终历史落库链路：目标仍是“采集尽量用成熟组件，自研集中在 SQL 指纹与分析”。
+5. `ExecutionRecord` 的正式字段、幂等键和原始日志保留策略。
 6. 高离散 SQL 的实际比例，以及仅使用结构指纹 + 分位数是否已经足以覆盖第一版在线异常检测。
+7. Baseline 聚合窗口、训练样本排除和漂移接受策略的具体参数。
