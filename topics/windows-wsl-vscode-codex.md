@@ -29,6 +29,7 @@ Windows 11
 - **Windows Native App + Codex + WSL Agent Environment**：已经实测可以让 Codex Agent 真正运行在 WSL2 中，并直接以 `/home/sfmon/code/tm-lab` 为工作目录；适合以 Agent / Issue / 多会话为中心的工作流。
 - **ChatGPT Work**：适合分析、调研、文档、报告、表格、演示等知识工作；可以处理授权的本地文件/目录，但当前不要把它理解成类似 Codex 的 WSL 开发 Agent。
 - 当前尚未决定完全切换到 Native App，建议一段时间内并行使用 VS Code Codex 和 Native Codex，以真实 Issue 比较工作效率。
+- Claude 桌面 App（Code）在 WSL 中的运行方式、手机 Remote Control 与推送配置，见 [Claude 桌面 App + WSL](./claude-desktop-wsl-remote-control.md)。
 
 ## 当前机器与 WSL 实例
 
