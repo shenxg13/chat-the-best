@@ -22,7 +22,7 @@
 | [Oracle RMAN / OSBWS 恢复 S3 备份报 unsupported-algorithm](./oracle-rman-osbws-s3-compatible-aws-chunked.md) | 遇到 `KBHS-00715` / `sbtread2` 恢复失败时查：`Content-Encoding: aws-chunked` 兼容性定位、抓包及 trace、在恢复专用副本移除相关 metadata 的绕过思路。 | 错误机制已定位；原始备份对象不得修改 |
 | [TiDB 临时表报 The table is full](./tidb-temporary-table-full.md) | 批处理写入**真正的 TiDB 临时表**失败时查：`tidb_tmp_table_max_size`、SESSION / GLOBAL 范围、如何与算子临时磁盘限额区别。 | 已确认案例；调整前须核实表类型 |
 | [Druid 连接池 CommunicationsException](./druid-connection-failure-network-jitter.md) | Druid 报连接通信失败并 `discard` 时查：`poolingCount`、`idleMillis`、`lastValidIdleMillis` 的含义、连接保活与网络排障证据。 | **阶段性判断**：倾向网络抖动，尚未最终定因 |
-| [Commvault 磁带全备：Chunk 提交失败与 10 次重启上限](./commvault-tape-backup-chunk-close-retries-2026.md) | 排查 **Linux MA→IBM LTO 磁带备份多天后失败**时查：Job 699224/700556、TapeMark 数分钟等待、`40:39` / Broken pipe、CS/MA 时钟差、FC/SCSI 历史、Index Backup/Stream 资源争用，以及调高重启次数的缓解边界。 | **阶段性排查**：已证实任务因累计重启 10 次终止；底层连接失效与设备等待的因果关系未定 |
+| [Commvault 磁带全备：Chunk 提交失败、重连差异与 10 次重启上限](./commvault-tape-backup-chunk-close-retries-2026.md) | 排查 **Linux MA→IBM 磁带全备多天后失败**时查：Job 699224/700556 的 TapeMark/Chunk 统计（含 18 次中长等待失败、2 次更长等待成功重连）、`40:39` / Broken pipe、五分钟周期、DM_MONITOR、CS/MA 时间差、FC/SCSI 与资源配置，及提高重试预算的缓解边界。 | **阶段性排查**：已确认累计 10 次重启致任务失败；新增“旧会话失效但过期识别/重连时机不同”工作假设，未锁定根因 |
 
 ## Kubernetes、容器与存储（3）
 
