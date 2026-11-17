@@ -4,16 +4,16 @@
 
 - **范围**：仅索引 `topics/` 下的专题文档；工作日志见 [工作日志入口](../summaries/work-log/README.md)。
 - **阅读提示**：留意“状态/边界”列，区分现场已验证的操作、阶段性判断和待验证的设计，不要把推测当成最终根因。
-- **索引核对日期**：2026-11-10（共 **16** 篇，按主要问题归类；跨领域内容可通过关键词搜索）。
+- **索引核对日期**：2026-11-17（共 **17** 篇，按主要问题归类；跨领域内容可通过关键词搜索）。
 
 ## 按领域浏览
 
-- [数据库、SQL 与备份（6）](#数据库sql-与备份6)
+- [数据库、SQL 与备份（7）](#数据库sql-与备份7)
 - [Kubernetes、容器与存储（3）](#kubernetes容器与存储3)
 - [Nginx、网络与对象存储（3）](#nginx网络与对象存储3)
 - [桌面系统、WSL 与 Agent 工具（4）](#桌面系统wsl-与-agent-工具4)
 
-## 数据库、SQL 与备份（6）
+## 数据库、SQL 与备份（7）
 
 | 文章 | 什么时候查 / 核心内容 | 状态 / 边界 |
 | --- | --- | --- |
@@ -23,6 +23,7 @@
 | [TiDB 临时表报 The table is full](./tidb-temporary-table-full.md) | 批处理写入**真正的 TiDB 临时表**失败时查：`tidb_tmp_table_max_size`、SESSION / GLOBAL 范围、如何与算子临时磁盘限额区别。 | 已确认案例；调整前须核实表类型 |
 | [Druid 连接池 CommunicationsException](./druid-connection-failure-network-jitter.md) | Druid 报连接通信失败并 `discard` 时查：`poolingCount`、`idleMillis`、`lastValidIdleMillis` 的含义、连接保活与网络排障证据。 | **阶段性判断**：倾向网络抖动，尚未最终定因 |
 | [Commvault 磁带全备：Chunk 提交失败、重连差异、时钟漂移与 10 次重启上限](./commvault-tape-backup-chunk-close-retries-2026.md) | 多日全备失败排查：两 Job 的 TapeMark/Chunk 统计、18 次中长等待失败与 2 次超长成功重连；追踪 11-10 TapeMark 线程长时间无日志、CS/MA Chunk 事件时间差从约 25s 漂至 29s、异常换算到 CS 侧每五分钟 :45～46 相位；解释 DM_MONITOR 与 MediaManager 日志无法证明 TCP 收发方向的边界，以及重试预算缓解方案。 | **阶段性排查**：确定 10 次重启耗尽导致整体失败；CS 周期性机制与旧连接失效/重建均属待证假设，SCSI 等待点、网络断链首发方未知 |
+| [Commvault：介质 Re-Copy 后 Aux-tape 的 Stream 11 缺失、磁带老化与主拷贝补拷](./commvault-aux-recopy-aged-stream11-2026.md) | 磁带 `DE0333L6` 的 Re-Copy 审计定位到 Job 700619；同流 `DE0343L6` 老化，Aux-tape 当前缺 Stream 11；主拷贝 HL 磁带虽过保留日期仍列为“辅助拷贝所需”，记录下次辅助拷贝前后核对点。 | **阶段性排查，等待下次 Auxiliary Copy 验证**；同流与时间关联已确认，Re-Copy 致老化的因果和实际补拷成功均未证实 |
 
 ## Kubernetes、容器与存储（3）
 
